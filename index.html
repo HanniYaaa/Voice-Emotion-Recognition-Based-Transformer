@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Emotion Detection</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f4f5f7;
+            margin: 0;
+            padding: 0;
+
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        .card {
+            width: 460px;
+            background: #ffffff;
+            border-radius: 16px;
+            padding: 28px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        }
+
+        h1, h2 {
+            text-align: center;
+            margin-top: 0;
+            color: #2d2d2d;
+            font-weight: 600;
+        }
+
+        input[type="file"] {
+            width: 100%;
+            margin: 12px 0 16px 0;
+        }
+
+        button {
+            width: 100%;
+            padding: 12px;
+            margin: 6px 0;
+            font-size: 15px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: 0.2s ease;
+        }
+
+        .btn-upload {
+            background: #5c6bc0;
+            color: white;
+        }
+        .btn-upload:hover {
+            background: #3f4e96;
+        }
+
+        .btn-start {
+            background: #4caf50;
+            color: white;
+        }
+        .btn-start:hover {
+            background: #3a8b3e;
+        }
+
+        .btn-stop {
+            background: #e53935;
+            color:white;
+        }
+        .btn-stop:hover {
+            background: #c62828;
+        }
+
+        #status {
+            text-align:center;
+            font-size: 15px;
+            margin-top: 10px;
+            color:#666;
+        }
+
+        #result-box {
+            margin-top: 22px;
+            background:#fafafa;
+            padding:18px;
+            border-radius: 12px;
+            border: 1px solid #e0e0e0;
+            display: none;
+        }
+
+        .prob-row {
+            font-size: 15px;
+            margin: 5px 0;
+        }
+    </style>
+
+</head>
+<body>
+
+<div class="card">
+
+    <h1>Emotion Detection</h1>
+
+    <h2>Upload Audio File</h2>
+    <input type="file" id="audioFile">
+    <button class="btn-upload" onclick="predictFile()">Predict File</button>
+
+    <h2>Record</h2>
+    <button class="btn-start" onclick="startRecording()">🎤 Start</button>
+    <button class="btn-stop" onclick="stopRecording()">⏹ Stop</button>
+
+    <p id="status"></p>
+
+    <div id="result-box">
+        <div id="result"></div>
+        <div id="probabilityText" style="margin-top:12px;"></div>
+    </div>
+
+</div>
+
+<script>
+/* ---- JS CODE (คงเดิมทั้งหมด ไม่มีแก้ไขการทำงาน) ---- */
+let audioContext, micStream, processor, chunks = [];
+
+async function startRecording() {
+    audioContext = new AudioContext({ sampleRate: 16000 });
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    const source = audioContext.createMediaStreamSource(micStream);
+    processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+
+    chunks = [];
+    processor.onaudioprocess = e => {
+        const input = e.inputBuffer.getChannelData(0);
+        chunks.push(new Float32Array(input));
+    };
+
+    document.getElementById("status").innerText = "Recording...";
+}
+
+function stopRecording() {
+    if (!processor) return;
+
+    processor.disconnect();
+    micStream.getTracks().forEach(t => t.stop());
+
+    let length = chunks.reduce((acc, cur) => acc + cur.length, 0);
+    let buffer = new Float32Array(length);
+
+    let offset = 0;
+    for (let c of chunks) {
+        buffer.set(c, offset);
+        offset += c.length;
+    }
+
+    let wavBlob = encodeWAV(buffer, 16000);
+    sendToAPI(wavBlob);
+
+    document.getElementById("status").innerText = "Stopped";
+}
+
+function encodeWAV(samples, sampleRate) {
+    let buffer = new ArrayBuffer(44 + samples.length * 2);
+    let view = new DataView(buffer);
+
+    function writeString(v, o, s) {
+        for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i));
+    }
+
+    writeString(view, 0, "RIFF");
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeString(view, 8, "WAVE");
+    writeString(view, 12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeString(view, 36, "data");
+    view.setUint32(40, samples.length * 2, true);
+
+    let idx = 44;
+    for (let i = 0; i < samples.length; i++, idx += 2) {
+        let s = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(idx, s * (s < 0 ? 0x8000 : 0x7FFF), true);
+    }
+
+    return new Blob([view], { type: "audio/wav" });
+}
+
+async function predictFile() {
+    const file = document.getElementById("audioFile").files[0];
+    if (!file) return alert("Select a file first");
+
+    const form = new FormData();
+    form.append("file", file);
+
+    const res = await fetch("/predict", { method: "POST", body: form });
+    const json = await res.json();
+
+    document.getElementById("result-box").style.display = "block";
+    renderResult(json);
+}
+
+async function sendToAPI(blob) {
+    const form = new FormData();
+    form.append("file", blob, "record.wav");
+
+    const res = await fetch("/predict", { method: "POST", body: form });
+    const json = await res.json();
+
+    document.getElementById("result-box").style.display = "block";
+    renderResult(json);
+}
+
+function renderResult(json) {
+    const resultBox = document.getElementById("result");
+    const labels = ["Neutral", "Angry", "Happy", "Sad", "Frustrated"];
+    const maxIndex = json.probabilities.indexOf(Math.max(...json.probabilities));
+
+    resultBox.innerHTML = `
+        <h3 style="text-align:center; color:#333;">
+            ${labels[maxIndex]} : ${(json.probabilities[maxIndex]*100).toFixed(1)}%
+        </h3>
+        <hr>
+    `;
+
+    showProbabilities(json.probabilities, labels, maxIndex);
+}
+
+function showProbabilities(probabilities, labels, maxIndex) {
+    const probabilityText = document.getElementById("probabilityText");
+    probabilityText.innerHTML = "";
+
+    probabilities.forEach((p, i) => {
+        const row = document.createElement("div");
+        row.className = "prob-row";
+        row.style.fontWeight = i === maxIndex ? "bold" : "normal";
+        row.style.color = i === maxIndex ? "#000" : "#666";
+        row.textContent = `${labels[i]} : ${(p*100).toFixed(1)}%`;
+        probabilityText.appendChild(row);
+    });
+}
+</script>
+
+</body>
+</html>
